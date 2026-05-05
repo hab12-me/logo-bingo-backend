@@ -4,6 +4,7 @@ class GameEngine {
     this.cards = new Map();
     this.draws = [];
     this.gameActive = false;
+    this.gameCompleted = false;  // ADDED: Track if game completed
     this.lobbyTimer = 30;
     this.currentReward = 1000;
     this.numberOfCards = parseInt(process.env.NUMBER_OF_CARDS) || 500;
@@ -49,9 +50,14 @@ class GameEngine {
       }
     }
     
-    grid[2][2] = 0;
+    grid[2][2] = 0; // Free space
     
     return grid;
+  }
+  
+  // ADDED: Get card by ID
+  getCardById(cardId) {
+    return this.cards.get(cardId) || null;
   }
   
   addPlayer(playerId, playerName) {
@@ -64,8 +70,10 @@ class GameEngine {
         dismissed: false,
         joinedAt: Date.now()
       });
-      console.log(`Player ${playerName} added to Logo Bingo`);
+      console.log(`Player ${playerName} (${playerId}) added to Logo Bingo`);
+      console.log(`Total players: ${this.players.size}`);
     }
+    return this.players.get(playerId);
   }
   
   lockCard(playerId, cardId) {
@@ -79,6 +87,7 @@ class GameEngine {
       throw new Error('Card not found');
     }
     
+    // Check if card is already locked by another player
     if (card.lockedBy && card.lockedBy !== playerId) {
       return {
         status: 'error',
@@ -87,17 +96,22 @@ class GameEngine {
       };
     }
     
+    // Unlock previous card if exists
     if (player.cardId) {
       const oldCard = this.cards.get(player.cardId);
       if (oldCard) {
         oldCard.lockedBy = null;
         oldCard.lockedAt = null;
+        console.log(`Unlocked card ${player.cardId} from player ${playerId}`);
       }
     }
     
+    // Lock new card
     card.lockedBy = playerId;
     card.lockedAt = Date.now();
     player.cardId = cardId;
+    
+    console.log(`Player ${playerId} locked card ${cardId}`);
     
     return {
       status: 'success',
@@ -113,6 +127,13 @@ class GameEngine {
   getGameState(playerId, playerName) {
     const player = this.players.get(playerId);
     const card = player && player.cardId ? this.cards.get(player.cardId) : null;
+    
+    // If player doesn't exist, create them
+    if (!player && playerId) {
+      console.log(`Creating new player via state request: ${playerId}`);
+      this.addPlayer(playerId, playerName || `Player_${playerId}`);
+      return this.getGameState(playerId, playerName);
+    }
     
     return {
       roomId: this.gameActive ? 'PLAYROOM' : 'LOBBY',
@@ -146,18 +167,36 @@ class GameEngine {
   }
   
   startGame() {
-    if (this.gameActive) return;
+    if (this.gameActive) {
+      console.log('Game already active');
+      return;
+    }
+    
+    if (this.players.size === 0) {
+      console.log('Cannot start game: No players');
+      return;
+    }
     
     this.gameActive = true;
+    this.gameCompleted = false;
     this.draws = [];
     this.currentReward = 1000 + (this.players.size * 100);
     this.lobbyTimer = null;
     
-    console.log(`Logo Bingo game started with ${this.players.size} players!`);
+    console.log(`🎮 Logo Bingo game started with ${this.players.size} players!`);
+    console.log(`💰 Jackpot: ${this.currentReward}`);
   }
   
   drawNumber() {
-    if (!this.gameActive) return null;
+    if (!this.gameActive) {
+      console.log('Game not active, cannot draw');
+      return null;
+    }
+    
+    if (this.draws.length >= 75) {
+      console.log('All numbers have been drawn!');
+      return null;
+    }
     
     let number;
     do {
@@ -165,21 +204,33 @@ class GameEngine {
     } while (this.draws.includes(number));
     
     this.draws.push(number);
-    console.log(`Number drawn in Logo Bingo: ${number}`);
+    console.log(`🎲 Number drawn: ${number} (Total draws: ${this.draws.length})`);
     return number;
   }
   
   claimBingo(playerId) {
     const player = this.players.get(playerId);
     if (!player || !player.cardId) {
+      console.log(`Bingo claim failed: Player ${playerId} has no card`);
       return { success: false };
     }
     
     const card = this.cards.get(player.cardId);
-    const winningNumbers = this.checkWinningPattern(card.grid, new Set(this.draws));
+    if (!card) {
+      console.log(`Bingo claim failed: Card ${player.cardId} not found`);
+      return { success: false };
+    }
+    
+    const drawnSet = new Set(this.draws);
+    const winningNumbers = this.checkWinningPattern(card.grid, drawnSet);
     
     if (winningNumbers.length > 0) {
+      // Add winnings to player wallet
+      const oldWallet = player.wallet;
       player.wallet += this.currentReward;
+      
+      console.log(`🎉 BINGO! ${player.name} (${playerId}) won!`);
+      console.log(`💰 Wallet: ${oldWallet} → ${player.wallet} (+${this.currentReward})`);
       
       const winners = [{
         playerName: player.name,
@@ -190,10 +241,21 @@ class GameEngine {
         winningNumbers: winningNumbers
       }];
       
+      // End the game
       this.gameActive = false;
+      this.gameCompleted = true;
       this.lobbyTimer = 30;
       
-      console.log(`BINGO! ${player.name} won Logo Bingo!`);
+      // Reset all card locks for next game
+      for (const [cid, c] of this.cards) {
+        c.lockedBy = null;
+        c.lockedAt = null;
+      }
+      
+      // Reset player cards for next game
+      for (const [pid, p] of this.players) {
+        p.cardId = null;
+      }
       
       return {
         success: true,
@@ -204,12 +266,14 @@ class GameEngine {
       };
     }
     
+    console.log(`Bingo claim failed: No winning pattern for ${player.name}`);
     return { success: false };
   }
   
   checkWinningPattern(card, drawnSet) {
     const winningNumbers = [];
     
+    // Check rows
     for (let row = 0; row < 5; row++) {
       let rowComplete = true;
       for (let col = 0; col < 5; col++) {
@@ -228,6 +292,7 @@ class GameEngine {
       }
     }
     
+    // Check columns
     for (let col = 0; col < 5; col++) {
       let colComplete = true;
       for (let row = 0; row < 5; row++) {
@@ -246,6 +311,7 @@ class GameEngine {
       }
     }
     
+    // Check diagonals
     let diag1Complete = true;
     let diag2Complete = true;
     
@@ -291,7 +357,43 @@ class GameEngine {
   decrementLobbyTimer() {
     if (this.lobbyTimer !== null && this.lobbyTimer > 0) {
       this.lobbyTimer--;
+      if (this.lobbyTimer % 5 === 0) {
+        console.log(`Lobby timer: ${this.lobbyTimer} seconds remaining`);
+      }
     }
+  }
+  
+  // ADDED: Reset game for new round
+  resetGame() {
+    this.gameActive = false;
+    this.gameCompleted = false;
+    this.draws = [];
+    this.lobbyTimer = 30;
+    this.currentReward = 1000;
+    
+    // Reset all card locks
+    for (const [cardId, card] of this.cards) {
+      card.lockedBy = null;
+      card.lockedAt = null;
+    }
+    
+    // Reset all player cards
+    for (const [playerId, player] of this.players) {
+      player.cardId = null;
+      player.dismissed = false;
+    }
+    
+    console.log('Game reset for new round');
+  }
+  
+  // ADDED: Get player by ID
+  getPlayer(playerId) {
+    return this.players.get(playerId) || null;
+  }
+  
+  // ADDED: Get all players
+  getAllPlayers() {
+    return Array.from(this.players.values());
   }
 }
 
